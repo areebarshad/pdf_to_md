@@ -251,6 +251,12 @@ print(result.report.validation_errors)
 
 ---
 
+## Author
+
+Areeb Arshad | Data Science, Statistics, and Mathematics @ Virginia Tech 
+
+---
+
 ## License
 
 See [LICENSE](LICENSE).
