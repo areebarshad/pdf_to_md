@@ -1,4 +1,4 @@
-# pdf_to_md
+# PDF → .md
 
 A PDF → Markdown converter with LaTeX math, tables, figures, and OCR support.
 
