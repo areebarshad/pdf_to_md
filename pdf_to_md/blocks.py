@@ -9,6 +9,7 @@ from .glyphs import Bar, Glyph, extract_bars, extract_glyphs
 from .layout import (
     dehyphenate_and_join,
     detect_footnotes,
+    detect_list_item,
     normalize_blocks,
     two_column_order,
 )
@@ -30,6 +31,7 @@ _DEFN_PAT = re.compile(
     re.IGNORECASE,
 )
 _PROOF_PAT = re.compile(r"^\s*proof\b", re.IGNORECASE)
+_HYPHEN_LINE_END = re.compile(r"\w-$")
 
 
 def _median(vals: list[float]) -> float:
@@ -52,16 +54,30 @@ def _classify(text: str) -> str:
     return "text"
 
 
+def _overlap_ratio(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    """Return the fraction of bbox *a* that is covered by bbox *b* (0.0–1.0)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    intersection = (ix1 - ix0) * (iy1 - iy0)
+    area_a = (ax1 - ax0) * (ay1 - ay0)
+    return intersection / area_a if area_a > 0 else 0.0
+
+
 def _bbox_in_suppressed(
     bbox: tuple[float, float, float, float],
     suppressed: list[tuple[float, float, float, float]],
 ) -> bool:
-    cx = (bbox[0] + bbox[2]) / 2
-    cy = (bbox[1] + bbox[3]) / 2
-    return any(
-        sx0 <= cx <= sx1 and sy0 <= cy <= sy1
-        for sx0, sy0, sx1, sy1 in suppressed
-    )
+    """Suppress a block only when >60% of its area overlaps a suppressed region."""
+    return any(_overlap_ratio(bbox, s) > 0.60 for s in suppressed)
 
 
 def _block_glyphs_and_bars(
@@ -85,7 +101,22 @@ def _block_glyphs_and_bars(
     return blk_glyphs, blk_bars
 
 
-def page_to_md(
+def _join_lines(lines_text: list[str]) -> str:
+    """Join lines with de-hyphenation and collapse runs of spaces."""
+    parts: list[str] = []
+    for line in lines_text:
+        if parts and _HYPHEN_LINE_END.search(parts[-1]):
+            if line and line[0].islower():
+                # Remove hyphen and join without space
+                parts[-1] = parts[-1][:-1] + line
+                continue
+        parts.append(line)
+    joined = " ".join(parts).strip()
+    # Collapse multiple spaces (justified-text artifact)
+    return re.sub(r" {2,}", " ", joined)
+
+
+def page_to_chunks(
     page: "fitz.Page",
     page_width: float,
     page_height: float,
@@ -95,12 +126,12 @@ def page_to_md(
     unmapped: dict[str, int] | None = None,
     low_confidence: bool = False,
     precomputed_blocks: list[dict] | None = None,
-) -> str:
+) -> list[tuple[float, str]]:
     """
-    Convert one page to Markdown.
+    Convert one page to a list of (y0, markdown_chunk) pairs.
 
-    suppressed_bboxes: regions already handled by tables/figures — skip body text there.
-    precomputed_blocks: pre-fetched and pre-filtered blocks (e.g. with running heads removed).
+    Each tuple carries the top y-coordinate of its source block so callers can
+    interleave tables and figures at their natural reading positions.
     """
     if precomputed_blocks is not None:
         blocks = precomputed_blocks
@@ -108,7 +139,7 @@ def page_to_md(
         data = page.get_text("dict", flags=0)
         blocks = data.get("blocks", [])
 
-    # Normalise text (ligatures, smart quotes, etc.)
+    # Normalise text (ligatures, TeX control chars, smart quotes, etc.)
     normalize_blocks(blocks)
 
     # Reading order
@@ -144,9 +175,18 @@ def page_to_md(
         except Exception:
             pass
 
-    out: list[str] = []
+    # Minimum x0 among non-suppressed body blocks, for list indentation
+    body_x0 = min(
+        (blk["bbox"][0] for blk in blocks
+         if blk.get("type") == 0
+         and not _bbox_in_suppressed(blk["bbox"], suppressed_bboxes)),
+        default=72.0,
+    )
+    indent_unit = 12.0  # typical per-level indent in points
 
-    for blk_idx, blk in enumerate(blocks):
+    chunks: list[tuple[float, str]] = []
+
+    for blk in blocks:
         if blk.get("type") != 0:
             continue
 
@@ -155,6 +195,7 @@ def page_to_md(
             continue
 
         x0, _, x1, _ = bbox
+        blk_y0: float = bbox[1]
         blk_center = (x0 + x1) / 2
         blk_width = x1 - x0
         is_centered = abs(blk_center - page_width / 2) < page_width * 0.12
@@ -166,7 +207,6 @@ def page_to_md(
         used_geometry = False
 
         if blk_glyphs and blk_bars and not no_math_layout:
-            # Determine if this block is math (any math glyph)
             block_is_math = any(
                 is_math_font(g.font) or has_math_chars(g.text)
                 for g in blk_glyphs
@@ -175,7 +215,7 @@ def page_to_md(
                 try:
                     block_math_text, used_geometry = block_to_latex(blk_glyphs, blk_bars)
                     if used_geometry:
-                        report.math_fallback_blocks = max(0, report.math_fallback_blocks)  # no-op, stays
+                        report.math_fallback_blocks = max(0, report.math_fallback_blocks)
                 except Exception:
                     block_math_text = None
                     report.math_fallback_blocks += 1
@@ -226,7 +266,7 @@ def page_to_md(
             if line_text:
                 lines_text.append(line_text)
 
-        full = " ".join(lines_text).strip()
+        full = _join_lines(lines_text)
         if not full:
             continue
 
@@ -237,15 +277,46 @@ def page_to_md(
         if block_math_text is not None and blk_has_math:
             full = block_math_text
 
-        # ── Classification ──────────────────────────────────────────────────
+        # ── List detection (before heading/math classification) ──────────────
+        if not blk_has_math:
+            list_items: list[tuple[str, str]] = []  # (marker, content)
+            continuation_buf: list[str] = []
+
+            for line in lines_text:
+                item = detect_list_item(line)
+                if item is not None:
+                    if continuation_buf and list_items:
+                        marker, content = list_items[-1]
+                        list_items[-1] = (marker, content + " " + " ".join(continuation_buf))
+                        continuation_buf = []
+                    elif continuation_buf:
+                        continuation_buf = []
+                    list_items.append(item)
+                else:
+                    continuation_buf.append(line)
+
+            if list_items:
+                # Flush any trailing continuation onto the last item
+                if continuation_buf:
+                    marker, content = list_items[-1]
+                    list_items[-1] = (marker, content + " " + " ".join(continuation_buf))
+
+                level = min(3, round((x0 - body_x0) / indent_unit))
+                level = max(0, level)
+                prefix = "  " * level
+                item_lines = [f"{prefix}{marker} {content}" for marker, content in list_items]
+                chunks.append((blk_y0, "\n".join(item_lines)))
+                continue
+
+        # ── Classification ───────────────────────────────────────────────────
         if not blk_has_math and blk_max_size >= h1_min:
-            out.append(f"\n# {full}\n")
+            chunks.append((blk_y0, f"\n# {full}\n"))
             continue
         if not blk_has_math and blk_max_size >= h2_min:
-            out.append(f"\n## {full}\n")
+            chunks.append((blk_y0, f"\n## {full}\n"))
             continue
         if not blk_has_math and re.match(r"^\d+(\.\d+)*\s+\w", full) and blk_bold:
-            out.append(f"\n## {full}\n")
+            chunks.append((blk_y0, f"\n## {full}\n"))
             continue
 
         if blk_has_math and is_centered and blk_width < page_width * 0.65:
@@ -253,38 +324,67 @@ def page_to_md(
             if eq_num_match:
                 eq_body = full[: eq_num_match.start()].strip()
                 eq_num = eq_num_match.group(1)
-                out.append(f"\n$$\n{eq_body} \\tag{{{eq_num}}}\n$$\n")
+                chunks.append((blk_y0, f"\n$$\n{eq_body} \\tag{{{eq_num}}}\n$$\n"))
             else:
-                out.append(f"\n$$\n{full}\n$$\n")
+                chunks.append((blk_y0, f"\n$$\n{full}\n$$\n"))
             report.display_equations += 1
             continue
 
         kind = _classify(full)
         if kind == "theorem":
-            out.append(f"\n> **{full}**\n")
+            chunks.append((blk_y0, f"\n> **{full}**\n"))
             continue
         if kind == "definition":
-            out.append(f"\n> *{full}*\n")
+            chunks.append((blk_y0, f"\n> *{full}*\n"))
             continue
         if kind == "proof":
-            out.append(f"\n*{full}*\n")
+            chunks.append((blk_y0, f"\n*{full}*\n"))
             continue
 
         if blk_has_math:
-            out.append(f"${full}$")
+            chunks.append((blk_y0, f"${full}$"))
             report.inline_math_runs += 1
             continue
 
         if blk_bold and len(full.split()) <= 8:
-            out.append(f"\n**{full}**\n")
+            chunks.append((blk_y0, f"\n**{full}**\n"))
             continue
 
-        out.append(full)
+        chunks.append((blk_y0, full))
 
-    # Append footnotes
+    # Append footnotes at the bottom of the page
     if footnote_lines:
-        out.append("")
-        for i, fn in enumerate(footnote_lines, 1):
-            out.append(f"[^{i}]: {fn}")
+        footnote_text = "\n".join(f"[^{i}]: {fn}" for i, fn in enumerate(footnote_lines, 1))
+        chunks.append((page_height, "\n" + footnote_text))
 
-    return "\n".join(out)
+    return chunks
+
+
+def page_to_md(
+    page: "fitz.Page",
+    page_width: float,
+    page_height: float,
+    suppressed_bboxes: list[tuple[float, float, float, float]],
+    report: ConversionReport,
+    no_math_layout: bool = False,
+    unmapped: dict[str, int] | None = None,
+    low_confidence: bool = False,
+    precomputed_blocks: list[dict] | None = None,
+) -> str:
+    """
+    Convert one page to Markdown.
+
+    Thin wrapper around page_to_chunks for backward compatibility.
+    """
+    chunks = page_to_chunks(
+        page,
+        page_width=page_width,
+        page_height=page_height,
+        suppressed_bboxes=suppressed_bboxes,
+        report=report,
+        no_math_layout=no_math_layout,
+        unmapped=unmapped,
+        low_confidence=low_confidence,
+        precomputed_blocks=precomputed_blocks,
+    )
+    return "\n".join(chunk for _, chunk in chunks)

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import re
+import statistics
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .layout import normalize_text
 from .mathtext import to_latex
 
 if TYPE_CHECKING:
@@ -25,7 +27,7 @@ class ExtractedTable:
 def _cell_to_md(cell: str | None) -> str:
     if cell is None:
         return ""
-    text = " ".join(cell.split())  # collapse in-cell newlines
+    text = normalize_text(" ".join(cell.split()))  # collapse in-cell newlines + normalize
     text = text.replace("|", r"\|")
     return text
 
@@ -60,25 +62,114 @@ def _try_find_tables(page: "fitz.Page", strategy: dict) -> list:
         return []
 
 
-def extract_tables(page: "fitz.Page") -> list[ExtractedTable]:
+def _has_ruling_lines(tbl, page: "fitz.Page") -> bool:
+    """Return True if there are ≥2 horizontal drawing segments spanning ≥60% of the table width."""
+    try:
+        bx0, _, bx1, _ = tbl.bbox
+        table_width = bx1 - bx0
+        if table_width <= 0:
+            return False
+        min_span = table_width * 0.60
+        count = 0
+        for path in page.get_drawings():
+            r = path.get("rect")
+            if r is None:
+                continue
+            rx0, ry0, rx1, ry1 = r
+            # Thin horizontal segment (height < 4 pt)
+            if (ry1 - ry0) < 4 and (rx1 - rx0) >= min_span:
+                count += 1
+                if count >= 2:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _table_is_plausible(tbl, page: "fitz.Page | None" = None, aggressive: bool = False) -> bool:
+    """
+    Return True only if the table looks like real tabular data.
+
+    Applies several prose-rejection heuristics to avoid treating justified
+    text columns as tables.
+    """
+    try:
+        rows = tbl.extract()
+        if not (len(rows) >= 2 and all(len(r) >= 2 for r in rows[:3])):
+            return False
+
+        # Flatten all cells for aggregate checks
+        all_cells = [c for row in rows for c in row]
+        non_empty = [c for c in all_cells if c and c.strip()]
+
+        if not non_empty:
+            return False
+
+        # 1. Mid-word column split: any cell ends with a letter while the
+        #    next cell in its row starts with a lowercase letter.
+        for row in rows:
+            for ci in range(len(row) - 1):
+                a = (row[ci] or "").strip()
+                b = (row[ci + 1] or "").strip()
+                if a and b and a[-1].isalpha() and b[0].islower():
+                    return False
+
+        # 2. Cell brevity: median word count > 6 implies prose paragraph, not data.
+        word_counts = [len(c.split()) for c in non_empty]
+        if statistics.median(word_counts) > 6:
+            return False
+
+        # 3. Wrapped cells: majority of cells contain embedded newlines.
+        cells_with_newlines = sum(1 for c in non_empty if "\n" in c)
+        if cells_with_newlines > len(non_empty) / 2:
+            return False
+
+        # 4. Sparsity: more than 30% of cells are None.
+        none_count = sum(1 for c in all_cells if c is None)
+        if none_count > len(all_cells) * 0.30:
+            return False
+
+        # 5. Area cap: reject a table covering >70% of the page that has no ruling.
+        if page is not None:
+            try:
+                bx0, by0, bx1, by1 = tbl.bbox
+                page_area = page.rect.width * page.rect.height
+                tbl_area = (bx1 - bx0) * (by1 - by0)
+                if tbl_area > page_area * 0.70 and not _has_ruling_lines(tbl, page):
+                    return False
+            except Exception:
+                pass
+
+        # 6. Aggressive-pass ruling evidence: require actual line drawings.
+        if aggressive and page is not None and not _has_ruling_lines(tbl, page):
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def extract_tables(page: "fitz.Page", strategy: str = "lines") -> list[ExtractedTable]:
     """
     Extract tables from a page and return GFM Markdown + suppression bboxes.
 
-    Tries ruled (strategy='lines') first, then booktabs-style. Keeps the
-    result with more plausible tables (≥2 rows × ≥2 cols).
+    strategy='lines'      — ruled tables only (default; safe for prose documents).
+    strategy='aggressive' — also try vertical_strategy='text'; only kept when it
+                            passes ruling-evidence checks.
     """
     ruled = _try_find_tables(page, {"strategy": "lines"})
-    booktabs = _try_find_tables(
-        page,
-        {"horizontal_strategy": "lines", "vertical_strategy": "text"},
-    )
+    p_ruled = [t for t in ruled if _table_is_plausible(t, page)]
 
-    def plausible(tabs: list) -> list:
-        return [t for t in tabs if _table_is_plausible(t)]
-
-    p_ruled = plausible(ruled)
-    p_booktabs = plausible(booktabs)
-    chosen = p_ruled if len(p_ruled) >= len(p_booktabs) else p_booktabs
+    # Prefer the ruled result; only fall back to aggressive when ruled found nothing.
+    if p_ruled or strategy != "aggressive":
+        chosen = p_ruled
+    else:
+        booktabs = _try_find_tables(
+            page,
+            {"horizontal_strategy": "lines", "vertical_strategy": "text"},
+        )
+        p_booktabs = [t for t in booktabs if _table_is_plausible(t, page, aggressive=True)]
+        chosen = p_booktabs
 
     results: list[ExtractedTable] = []
     for tbl in chosen:
@@ -86,14 +177,6 @@ def extract_tables(page: "fitz.Page") -> list[ExtractedTable]:
         if md:
             results.append(ExtractedTable(markdown=md, bbox=bbox, approximated=approx))
     return results
-
-
-def _table_is_plausible(tbl) -> bool:
-    try:
-        rows = tbl.extract()
-        return len(rows) >= 2 and all(len(r) >= 2 for r in rows[:3])
-    except Exception:
-        return False
 
 
 def _render_table(tbl) -> tuple[str, bool, tuple[float, float, float, float]]:

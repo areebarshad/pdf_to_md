@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .blocks import page_to_md
+from .blocks import page_to_chunks
 from .figures import extract_figures
 from .layout import strip_running_heads
 from .ocr import OcrUnavailable, get_ocr_textpage, page_needs_ocr
@@ -34,6 +34,7 @@ def convert_pdf(
     page_markers: bool = True,
     allow_empty: bool = False,
     assets_dir_name: str | None = None,
+    tables: str = "lines",
 ) -> ConversionResult:
     try:
         import pymupdf as fitz
@@ -98,14 +99,13 @@ def convert_pdf(
             suppressed: list[tuple[float, float, float, float]] = []
 
             # Table extraction
-            table_mds: list[str] = []
+            extracted_tables = []
             if not no_tables:
                 try:
                     from .tables import extract_tables
-                    tables = extract_tables(page)
-                    for tbl in tables:
+                    extracted_tables = extract_tables(page, strategy=tables)
+                    for tbl in extracted_tables:
                         suppressed.append(tbl.bbox)
-                        table_mds.append(tbl.markdown)
                         report.tables_found += 1
                         if tbl.approximated:
                             report.tables_approximated += 1
@@ -113,7 +113,7 @@ def convert_pdf(
                     report.warnings.append(f"Page {page_num}: table extraction failed: {exc}")
 
             # Figure extraction
-            figure_mds: list[str] = []
+            extracted_figures = []
             consumed_blocks: set[int] = set()
             if not no_images:
                 try:
@@ -123,13 +123,13 @@ def convert_pdf(
                     )
                     for fig in figs:
                         suppressed.append(fig.bbox)
-                        figure_mds.append(fig.markdown)
                         report.figures_extracted += 1
+                    extracted_figures = figs
                 except Exception as exc:
                     report.warnings.append(f"Page {page_num}: figure extraction failed: {exc}")
 
-            # Body text
-            md = page_to_md(
+            # Body text chunks with y-positions
+            body_chunks = page_to_chunks(
                 page,
                 page_width=page_width,
                 page_height=page_height,
@@ -141,19 +141,26 @@ def convert_pdf(
                 precomputed_blocks=stripped_blocks,
             )
 
-            # Assemble page: figures/tables interleaved by y-position is complex;
-            # simpler approach: tables first (they have suppression rects so body skips them),
-            # then body text, then figures at their natural positions would require
-            # full reading-order merge. For now, emit tables before body, figures after.
-            page_parts: list[str] = []
-            if table_mds:
-                page_parts.extend(table_mds)
-            if md.strip():
-                page_parts.append(md)
-            if figure_mds:
-                page_parts.extend(figure_mds)
+            # Positional assembly: insert tables and figures before the first
+            # body chunk whose y0 exceeds theirs, preserving column order from
+            # two_column_order (avoids re-deriving the gutter).
+            all_chunks: list[tuple[float, str]] = list(body_chunks)
 
-            page_md = "\n\n".join(p for p in page_parts if p.strip())
+            positioned: list[tuple[float, str]] = []
+            for tbl in extracted_tables:
+                positioned.append((tbl.bbox[1], tbl.markdown))
+            for fig in extracted_figures:
+                positioned.append((fig.bbox[1], fig.markdown))
+
+            for y, md_chunk in sorted(positioned, key=lambda x: x[0]):
+                insert_pos = next(
+                    (i for i, (by, _) in enumerate(all_chunks) if by > y),
+                    len(all_chunks),
+                )
+                all_chunks.insert(insert_pos, (y, md_chunk))
+
+            page_md = "\n\n".join(chunk for _, chunk in all_chunks if chunk.strip())
+
             if page_md.strip():
                 if page_markers:
                     parts.append(f"<!-- page {page_num} -->\n{page_md}")

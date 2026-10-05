@@ -1,11 +1,12 @@
 """Reading-order, running head/foot removal, de-hyphenation, and text normalisation."""
 from __future__ import annotations
 
+import copy
 import re
 import statistics
 from collections import Counter
 
-from .symbols import LIGATURES
+from .symbols import LIGATURES, TEX_CTRL, TEX_CTRL_OT1
 
 _TERMINAL_PUNCT = re.compile(r"[.!?:;]$")
 _HYPHEN_END = re.compile(r"(\w)-$")
@@ -15,11 +16,50 @@ _LIST_NUMERIC = re.compile(r"^\d+[.)]\s+")
 _FOOTNOTE_RE = re.compile(r"^\s*(\d+|[*†‡])\s+\S")
 _SECTION_NUM = re.compile(r"^\d")
 
+# Single-pass normalization: TEX_CTRL chars first (exact, ungated),
+# then LIGATURES (handles precomposed Unicode ligatures and smart quotes).
+_NORMALIZE_MAP: dict[str, str] = {**TEX_CTRL, **LIGATURES}
+_NORMALIZE_RE = re.compile(
+    "|".join(re.escape(k) for k in sorted(_NORMALIZE_MAP, key=len, reverse=True))
+)
 
-def _normalize_text(text: str) -> str:
-    for src, dst in LIGATURES.items():
-        text = text.replace(src, dst)
+# OT1 chars gated by letter adjacency to avoid matching form-feed / carriage-return.
+_OT1_PATS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(f"(?<=[A-Za-z]){re.escape(k)}|{re.escape(k)}(?=[A-Za-z])"), v)
+    for k, v in TEX_CTRL_OT1.items()
+]
+
+
+def normalize_text(text: str) -> str:
+    """Single-pass decode of TeX control chars, ligatures, and smart punctuation."""
+    text = _NORMALIZE_RE.sub(lambda m: _NORMALIZE_MAP[m.group(0)], text)
+    for pat, repl in _OT1_PATS:
+        text = pat.sub(repl, text)
     return text
+
+
+# Keep private alias so any internal code that still calls _normalize_text works.
+_normalize_text = normalize_text
+
+
+def detect_list_item(text: str) -> tuple[str, str] | None:
+    """
+    Return (md_marker, content) if text begins with a recognized list marker, else None.
+
+    md_marker is '-' for bullet/alpha items and 'N.' for numbered items.
+    """
+    m = _LIST_BULLET.match(text)
+    if m:
+        return ("-", text[m.end():])
+    m = _LIST_ALPHA.match(text)
+    if m:
+        return ("-", text[m.end():])
+    m = _LIST_NUMERIC.match(text)
+    if m:
+        num_match = re.match(r"(\d+)", text)
+        marker = f"{num_match.group(1)}." if num_match else "-"
+        return (marker, text[m.end():])
+    return None
 
 
 def _block_text(blk: dict) -> str:
@@ -151,9 +191,11 @@ def dehyphenate_and_join(blocks: list[dict]) -> list[dict]:
         return blocks
 
     result: list[dict] = []
-    skip = set()
+    skip: set[int] = set()
     for i, blk in enumerate(blocks):
-        if i in skip or blk.get("type") != 0:
+        if i in skip:
+            continue  # drop the merged-away block entirely
+        if blk.get("type") != 0:
             result.append(blk)
             continue
         text = _block_text(blk)
@@ -163,7 +205,7 @@ def dehyphenate_and_join(blocks: list[dict]) -> list[dict]:
             next_text = _block_text(blocks[i + 1])
             if next_text and next_text[0].islower():
                 merged_text = text[: m.start()] + m.group(1) + next_text
-                blk = dict(blk)
+                blk = copy.deepcopy(blk)
                 _set_block_text(blk, merged_text)
                 skip.add(i + 1)
                 result.append(blk)
@@ -226,5 +268,5 @@ def normalize_blocks(blocks: list[dict]) -> list[dict]:
             for sp in ln.get("spans", []):
                 raw = sp.get("text", "")
                 if raw:
-                    sp["text"] = _normalize_text(raw)
+                    sp["text"] = normalize_text(raw)
     return blocks

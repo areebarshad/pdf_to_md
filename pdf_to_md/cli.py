@@ -87,6 +87,7 @@ def main() -> None:
                 page_markers=not args.no_page_markers,
                 allow_empty=args.allow_empty,
                 assets_dir_name=args.assets_dir,
+                tables=args.tables,
             )
             dest = (out_dir / pdf.stem).with_suffix(".md") if out_dir else pdf.with_suffix(".md")
             if out_dir:

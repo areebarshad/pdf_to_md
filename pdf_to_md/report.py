@@ -73,8 +73,10 @@ def validate_markdown(md: str) -> list[str]:
         errors.append("Empty \\frac{}{} found")
 
     # Stray control characters (except tab/newline/CR)
-    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", md):
-        errors.append("Stray control characters in output")
+    stray = re.findall(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", md)
+    if stray:
+        named = ", ".join(sorted({f"U+{ord(c):04X}" for c in stray}))
+        errors.append(f"Stray control characters in output: {named}")
 
     return errors
 

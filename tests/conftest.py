@@ -172,3 +172,42 @@ def image_only_pdf(tmp_path: Path) -> Path:
     p = tmp_path / "scanned.pdf"
     p.write_bytes(_make_pdf(build))
     return p
+
+
+@pytest.fixture
+def prose_pdf(tmp_path: Path) -> Path:
+    """Page of justified prose with no real table structure."""
+    def build(doc):
+        page = doc.new_page(width=612, height=792)
+        lines = [
+            "This is the first sentence of a paragraph of prose text.",
+            "It continues onto a second line with more words to fill the line.",
+            "A third sentence follows to make the block look like body text.",
+            "Group project components are randomized across the class roster.",
+            "The final term project is a group project in the course.",
+        ]
+        for i, line in enumerate(lines):
+            page.insert_text((72, 100 + i * 16), line, fontsize=11)
+
+    p = tmp_path / "prose.pdf"
+    p.write_bytes(_make_pdf(build))
+    return p
+
+
+@pytest.fixture
+def bullet_list_pdf(tmp_path: Path) -> Path:
+    """Page with a simple bullet list (using Unicode bullet character)."""
+    def build(doc):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), "Introduction", fontsize=14)
+        items = [
+            "• First item in the list",
+            "• Second item in the list",
+            "• Third item in the list",
+        ]
+        for i, item in enumerate(items):
+            page.insert_text((80, 130 + i * 18), item, fontsize=11)
+
+    p = tmp_path / "bullets.pdf"
+    p.write_bytes(_make_pdf(build))
+    return p

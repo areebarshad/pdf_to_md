@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .layout import normalize_text
+
 if TYPE_CHECKING:
     import pymupdf as fitz  # noqa: F401
 
@@ -110,11 +112,11 @@ def extract_figures(
             if blk.get("type") != 0:
                 continue
             bx0, by0, bx1, by1 = blk["bbox"]
-            text = " ".join(
+            text = normalize_text(" ".join(
                 sp.get("text", "")
                 for ln in blk.get("lines", [])
                 for sp in ln.get("spans", [])
-            ).strip()
+            ).strip())
             if not _CAPTION_RE.match(text):
                 continue
             # Check proximity: within CAPTION_DIST above or below

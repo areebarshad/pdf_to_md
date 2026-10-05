@@ -98,3 +98,19 @@ LIGATURES: dict[str, str] = {
     "“": '"', "”": '"',  # smart double quotes
     "–": "--", "—": "---",  # en/em dash
 }
+
+
+# TeX/LaTeX T1 (Cork) encoding control-character maps.
+# \x1b-\x1f are the T1 ligature block; \x10/\x11 dotless letters;
+# \x16 is T1 em-dash (advance ~1.079 em); \x88 is the T1 bullet glyph.
+TEX_CTRL: dict[str, str] = {
+    "\x1b": "ff", "\x1c": "fi", "\x1d": "fl", "\x1e": "ffi", "\x1f": "ffl",
+    "\x10": "i", "\x11": "j",
+    "\x16": "\u2014", "\x88": "\u2022",
+}
+
+# OT1 ligature block -- \x0b-\x0f collide with form-feed/CR so these must only
+# be substituted when surrounded by letters (see normalize_text in layout.py).
+TEX_CTRL_OT1: dict[str, str] = {
+    "\x0b": "ff", "\x0c": "fi", "\x0d": "fl", "\x0e": "ffi", "\x0f": "ffl",
+}
