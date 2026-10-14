@@ -77,6 +77,7 @@ def extract_figures(
     dpi: int,
     table_bboxes: list[tuple[float, float, float, float]],
     text_blocks: list[dict],
+    pdf_stem: str = "",
 ) -> tuple[list[ExtractedFigure], set[int]]:
     """
     Extract raster images and vector-cluster figures.
@@ -98,7 +99,8 @@ def extract_figures(
             clip_rect = fitz.Rect(*clip)
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
-            fname = assets_dir / f"page{page_num:02d}-fig{fig_counter[0]:02d}.png"
+            prefix = f"{pdf_stem}_" if pdf_stem else ""
+            fname = assets_dir / f"{prefix}page{page_num:02d}_fig{fig_counter[0]:02d}.png"
             fig_counter[0] += 1
             pix.save(str(fname))
             return fname
@@ -155,7 +157,8 @@ def extract_figures(
         try:
             img_data = doc.extract_image(xref)
             ext = img_data.get("ext", "png")
-            fname = assets_dir / f"page{page_num:02d}-fig{fig_counter[0]:02d}.{ext}"
+            prefix = f"{pdf_stem}_" if pdf_stem else ""
+            fname = assets_dir / f"{prefix}page{page_num:02d}_fig{fig_counter[0]:02d}.{ext}"
             fig_counter[0] += 1
             fname.write_bytes(img_data["image"])
         except Exception:

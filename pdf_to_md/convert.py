@@ -120,6 +120,7 @@ def convert_pdf(
                     figs, consumed_blocks = extract_figures(
                         page, doc, page_num, assets_dir, dpi,
                         suppressed, stripped_blocks,
+                        pdf_stem=pdf_path.stem,
                     )
                     for fig in figs:
                         suppressed.append(fig.bbox)
