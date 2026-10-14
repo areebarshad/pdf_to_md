@@ -12,6 +12,16 @@ from .layout import strip_running_heads
 from .ocr import OcrUnavailable, get_ocr_textpage, page_needs_ocr
 from .report import ConversionReport, validate_markdown
 
+# Optional: improved page layout analysis (column order, reading order).
+# Importing the package is enough — it registers itself as a PyMuPDF plugin
+# and enhances get_text() block ordering automatically.  When absent the
+# existing two_column_order heuristic is used instead.
+try:
+    import pymupdf_layout as _pymupdf_layout  # noqa: F401
+    _HAS_LAYOUT = True
+except ImportError:
+    _HAS_LAYOUT = False
+
 if TYPE_CHECKING:
     pass
 
@@ -48,11 +58,13 @@ def convert_pdf(
     with fitz.open(str(pdf_path)) as doc:
         report.pages_total = len(doc)
 
-        # Collect all page blocks for running-head detection
+        # Collect all page blocks for running-head detection.
+        # When pymupdf_layout is installed, sort=True activates its improved
+        # reading-order analysis (handles multi-column layouts natively).
         all_page_blocks: list[list[dict]] = []
         page_heights: list[float] = []
         for page in doc:
-            data = page.get_text("dict", flags=0)
+            data = page.get_text("dict", flags=0, sort=_HAS_LAYOUT)
             all_page_blocks.append(data.get("blocks", []))
             page_heights.append(page.rect.height)
 
@@ -140,6 +152,7 @@ def convert_pdf(
                 unmapped=unmapped,
                 low_confidence=low_confidence,
                 precomputed_blocks=stripped_blocks,
+                layout_sorted=_HAS_LAYOUT,
             )
 
             # Positional assembly: insert tables and figures before the first

@@ -126,6 +126,7 @@ def page_to_chunks(
     unmapped: dict[str, int] | None = None,
     low_confidence: bool = False,
     precomputed_blocks: list[dict] | None = None,
+    layout_sorted: bool = False,
 ) -> list[tuple[float, str]]:
     """
     Convert one page to a list of (y0, markdown_chunk) pairs.
@@ -142,8 +143,9 @@ def page_to_chunks(
     # Normalise text (ligatures, TeX control chars, smart quotes, etc.)
     normalize_blocks(blocks)
 
-    # Reading order
-    blocks = two_column_order(blocks, page_width)
+    # Reading order — skip if pymupdf_layout already sorted blocks
+    if not layout_sorted:
+        blocks = two_column_order(blocks, page_width)
 
     # De-hyphenation
     blocks = dehyphenate_and_join(blocks)
