@@ -1,17 +1,19 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf-to-md"
-version = "0.2.0"
+version = "0.3.0"
 description = "PDF to Markdown converter with LaTeX math, tables, figures, and OCR"
-requires-python = ">=3.9"
-dependencies = ["pymupdf>=1.24"]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["pymupdf>=2.1,<3"]
 
 [project.optional-dependencies]
-layout = ["pymupdf_layout"]
-license = {text = "MIT"}
+test = ["pytest>=7"]
 
 [project.scripts]
 pdf-to-md = "pdf_to_md.cli:main"
